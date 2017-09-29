@@ -137,12 +137,16 @@ def build(sources: List[BuildSource],
       bin_dir: directory containing the mypy script, used for finding data
         directories; if omitted, use '.' as the data directory
     """
+    progress_meter = ProgressMeter()
+    progress = progress_meter.progress
 
+    progress("Determining default data directory")
     data_dir = default_data_dir(bin_dir)
 
+    progress("Clearing find_module caches")
     find_module_clear_caches()
 
-    # Determine the default module search path.
+    progress("Determining default module search path")
     lib_path = default_lib_path(data_dir,
                                 options.python_version,
                                 custom_typeshed_dir=options.custom_typeshed_dir)
@@ -171,6 +175,7 @@ def build(sources: List[BuildSource],
     lib_path[:0] = options.mypy_path
 
     # Add MYPYPATH environment variable to front of library path, if defined.
+    progress("Determining mypy path")
     lib_path[:0] = mypy_path()
 
     # If provided, insert the caller-supplied extra module path to the
@@ -178,14 +183,19 @@ def build(sources: List[BuildSource],
     if alt_lib_path:
         lib_path.insert(0, alt_lib_path)
 
+    progress("Setting up reports")
     reports = Reports(data_dir, options.report_dirs)
+    progress("Creating source set")
     source_set = BuildSourceSet(sources)
+    progress("Creating errors objects")
     errors = Errors(options.show_error_context, options.show_column_numbers)
+    progress("Loading plugins")
     plugin = load_plugins(options, errors)
 
     # Construct a build manager object to hold state during the build.
     #
     # Ignore current directory prefix in error messages.
+    progress("Creating build manager")
     manager = BuildManager(data_dir, lib_path,
                            ignore_prefix=os.getcwd(),
                            source_set=source_set,
@@ -194,18 +204,31 @@ def build(sources: List[BuildSource],
                            version_id=__version__,
                            plugin=plugin,
                            errors=errors)
+    import gc
+    gc.set_threshold(1000000)  # One *million* dollers
+    gc_start_time = 0
+    def gc_log(phase, info):
+        nonlocal gc_start_time
+        if phase == 'start':
+            gc_start_time = time.time()
+            manager.progress("GC start; %s" % (info,))
+        else:
+            manager.progress("GC took %.1f sec; %s" % (time.time() - gc_start_time, info))
+    gc.callbacks.append(gc_log)
 
     try:
         graph = dispatch(sources, manager)
         return BuildResult(manager, graph)
     finally:
-        manager.log("Build finished in %.3f seconds with %d modules, %d types, and %d errors" %
-                    (time.time() - manager.start_time,
-                     len(manager.modules),
-                     len(manager.all_types),
-                     manager.errors.num_messages()))
+        manager.progress("Build finished in %.3f seconds with %d modules, %d types, and %d errors" %
+                         (time.time() - manager.start_time,
+                          len(manager.modules),
+                          len(manager.all_types),
+                          manager.errors.num_messages()))
         # Finish the HTML or XML reports even if CompileError was raised.
+        manager.progress("Finishing reports")
         reports.finish()
+        manager.progress("Done")
 
 
 def default_data_dir(bin_dir: Optional[str]) -> str:
@@ -450,9 +473,48 @@ def find_config_file_line_number(path: str, section: str, setting_name: str) -> 
     return -1
 
 
+class ProgressMeter:
+
+    _line_length = None  # type: Optional[int]
+    epoch = None
+
+    def line_length(self):
+        if self._line_length is None:
+            self.epoch = time.time()
+            try:
+                # From https://gist.github.com/sbz/bca2d1327910e0d8cadff1835625cbf2
+                import termios
+                import fcntl
+                import os
+                import struct
+                with open(os.ctermid(), 'r') as fd:
+                            packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+                            rows, cols, h_pixels, v_pixels = struct.unpack('HHHH', packed)
+                self._line_length = cols
+            except (ImportError, AttributeError):
+                self._line_length = 0
+        return self._line_length
+
+    def progress(self, *message: str) -> None:
+        line_length = self.line_length()
+        if line_length:
+            dt = time.time() - self.epoch
+            msg = "[%5.1f] %s" % (dt, " ".join(message))
+            if len(msg) >= line_length:
+                msg = msg[:line_length - 3] + "..."
+            print(msg, end='\n', file=sys.stderr)
+            sys.stderr.flush()
+        else:
+            self.log(*message)
+
+    def log(self, *message: str) -> None:
+        # For subclass to override
+        pass
+
+
 # TODO: Get rid of all_types.  It's not used except for one log message.
 #       Maybe we could instead publish a map from module ID to its type_map.
-class BuildManager:
+class BuildManager(ProgressMeter):
     """This class holds shared state for building a mypy program.
 
     It is used to coordinate parsing, import processing, semantic
@@ -623,7 +685,11 @@ class BuildManager:
 
     def log(self, *message: str) -> None:
         if self.options.verbosity >= 1:
-            print('LOG: ', *message, file=sys.stderr)
+            msg = " ".join(map(str, message))
+            ll = self.line_length() - 7
+            if len(msg) > ll:
+                msg = msg[:ll-3] + '...'
+            print('LOG: ', msg, file=sys.stderr)
             sys.stderr.flush()
 
     def trace(self, *message: str) -> None:
@@ -1035,8 +1101,8 @@ def validate_meta(meta: Optional[CacheMeta], id: str, path: Optional[str],
             else:
                 meta_str = json.dumps(meta_dict)
             meta_json, _ = get_cache_names(id, path, manager)
-            manager.log('Updating mtime for {}: file {}, meta {}, mtime {}'
-                        .format(id, path, meta_json, meta.mtime))
+            manager.progress('Updating mtime for {}: file {}, meta {}, mtime {}'
+                             .format(id, path, meta_json, meta.mtime))
             atomic_write(meta_json, meta_str, '\n')  # Ignore errors, it's just an optimization.
             return meta
 
@@ -1585,6 +1651,7 @@ class State:
     def load_tree(self) -> None:
         assert self.meta is not None, "Internal error: this method must be called only" \
                                       " for cached modules"
+        self.manager.progress("Loading tree", self.id)
         with open(self.meta.data_json) as f:
             data = json.load(f)
         # TODO: Assert data file wasn't changed.
@@ -1663,7 +1730,7 @@ class State:
 
         manager = self.manager
         modules = manager.modules
-        manager.log("Parsing %s (%s)" % (self.xpath, self.id))
+        manager.progress("Parsing %s (%s)" % (self.xpath, self.id))
 
         with self.wrap_context():
             source = self.source
@@ -1853,6 +1920,7 @@ class State:
 
 def dispatch(sources: List[BuildSource], manager: BuildManager) -> Graph:
     manager.log("Mypy version %s" % __version__)
+    manager.progress("Loading graph")
     graph = load_graph(sources, manager)
     if not graph:
         print("Nothing to do?!")
@@ -1996,6 +2064,7 @@ class FreshState(State):
 
 def process_graph(graph: Graph, manager: BuildManager) -> None:
     """Process everything in dependency order."""
+    manager.progress("Sorting graph components")
     sccs = sorted_components(graph)
     manager.log("Found %d SCCs; largest has %d nodes" %
                 (len(sccs), max(len(scc) for scc in sccs)))
@@ -2089,11 +2158,11 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
 
         scc_str = " ".join(scc)
         if fresh:
-            manager.log("Queuing %s SCC (%s)" % (fresh_msg, scc_str))
+            manager.progress("Queuing %s SCC (%s)" % (fresh_msg, scc_str))
             fresh_scc_queue.append(scc)
         else:
             if len(fresh_scc_queue) > 0:
-                manager.log("Processing the last {} queued SCCs".format(len(fresh_scc_queue)))
+                manager.progress("Processing the last {} queued SCCs since the next SCC ({}) is stale".format(len(fresh_scc_queue), scc_str))
                 # Defer processing fresh SCCs until we actually run into a stale SCC
                 # and need the earlier modules to be loaded.
                 #
@@ -2108,9 +2177,9 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
                 fresh_scc_queue = []
             size = len(scc)
             if size == 1:
-                manager.log("Processing SCC singleton (%s) as %s" % (scc_str, fresh_msg))
+                manager.progress("Processing SCC singleton (%s) as %s" % (scc_str, fresh_msg))
             else:
-                manager.log("Processing SCC of size %d (%s) as %s" % (size, scc_str, fresh_msg))
+                manager.progress("Processing SCC of size %d (%s) as %s" % (size, scc_str, fresh_msg))
             process_stale_scc(graph, scc, manager)
 
     sccs_left = len(fresh_scc_queue)
@@ -2185,6 +2254,10 @@ def process_stale_scc(graph: Graph, scc: List[str], manager: BuildManager) -> No
 
     Exception: If quick_and_dirty is set, use the cache for fresh modules.
     """
+    if len(scc) >= 1:
+        progress = manager.progress
+    else:
+        progress = lambda *args: None
     if manager.options.quick_and_dirty:
         fresh = [id for id in scc if graph[id].is_fresh()]
         fresh_set = set(fresh)  # To avoid running into O(N**2)
@@ -2196,31 +2269,41 @@ def process_stale_scc(graph: Graph, scc: List[str], manager: BuildManager) -> No
     else:
         fresh = []
         stale = scc
+    progress("Loading trees")
     for id in fresh:
         graph[id].load_tree()
+    progress("Parsing files")
     for id in stale:
         # We may already have parsed the module, or not.
         # If the former, parse_file() is a no-op.
         graph[id].parse_file()
         graph[id].fix_suppressed_dependencies(graph)
+    progress("Fixing cross refs")
     for id in fresh:
         graph[id].fix_cross_refs()
+    progress("Semantic analysis")
     for id in stale:
         graph[id].semantic_analysis()
+    progress("Semantic analysis pass three")
     for id in stale:
         graph[id].semantic_analysis_pass_three()
+    progress("Calculate mros")
     for id in fresh:
         graph[id].calculate_mros()
+    progress("Semantic analysis apply patches")
     for id in stale:
         graph[id].semantic_analysis_apply_patches()
+    progress("Type check first pass")
     for id in stale:
         graph[id].type_check_first_pass()
     more = True
     while more:
         more = False
+        progress("Type check second pass")
         for id in stale:
             if graph[id].type_check_second_pass():
                 more = True
+    progress("Finish passes, write caches, mark as rechecked")
     for id in stale:
         graph[id].finish_passes()
         graph[id].write_cache()

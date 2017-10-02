@@ -229,6 +229,8 @@ def build(sources: List[BuildSource],
         manager.progress("Finishing reports")
         reports.finish()
         manager.progress("Done")
+        for line in os.popen("ps -v -p %d" % os.getpid()):
+            manager.progress(line.rstrip())
 
 
 def default_data_dir(bin_dir: Optional[str]) -> str:
@@ -2254,7 +2256,7 @@ def process_stale_scc(graph: Graph, scc: List[str], manager: BuildManager) -> No
 
     Exception: If quick_and_dirty is set, use the cache for fresh modules.
     """
-    if len(scc) >= 1:
+    if len(scc) >= 10:
         progress = manager.progress
     else:
         progress = lambda *args: None

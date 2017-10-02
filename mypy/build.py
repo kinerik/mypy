@@ -137,8 +137,7 @@ def build(sources: List[BuildSource],
       bin_dir: directory containing the mypy script, used for finding data
         directories; if omitted, use '.' as the data directory
     """
-    progress_meter = ProgressMeter()
-    progress = progress_meter.progress
+    progress = ProgressMeter()
 
     progress("Determining default data directory")
     data_dir = default_data_dir(bin_dir)
@@ -203,7 +202,8 @@ def build(sources: List[BuildSource],
                            options=options,
                            version_id=__version__,
                            plugin=plugin,
-                           errors=errors)
+                           errors=errors,
+                           progress=progress)
     import gc
     gc.set_threshold(1000000)  # One *million* dollers
     gc_start_time = 0
@@ -477,10 +477,14 @@ def find_config_file_line_number(path: str, section: str, setting_name: str) -> 
 
 class ProgressMeter:
 
+    def __init__(self) -> None:
+        self.logfile = open('@progress.txt', 'a')
+        self.logfile.write("New session: %s\n" % time.ctime())
+
     _line_length = None  # type: Optional[int]
     epoch = None
 
-    def line_length(self):
+    def line_length(self) -> int:
         if self._line_length is None:
             self.epoch = time.time()
             try:
@@ -502,21 +506,27 @@ class ProgressMeter:
         if line_length:
             dt = time.time() - self.epoch
             msg = "[%5.1f] %s" % (dt, " ".join(message))
+            print(msg, file=self.logfile)
+            self.logfile.flush()
             if len(msg) >= line_length:
                 msg = msg[:line_length - 3] + "..."
-            print(msg, end='\n', file=sys.stderr)
+            print(msg, end='\r', file=sys.stderr)
             sys.stderr.flush()
         else:
             self.log(*message)
 
+    __call__ = progress
+
+    log_function = None  # type: Optional[Callable[..., None]]
+
     def log(self, *message: str) -> None:
-        # For subclass to override
-        pass
+        if self.log_function:
+            self.log_function(*message)
 
 
 # TODO: Get rid of all_types.  It's not used except for one log message.
 #       Maybe we could instead publish a map from module ID to its type_map.
-class BuildManager(ProgressMeter):
+class BuildManager:
     """This class holds shared state for building a mypy program.
 
     It is used to coordinate parsing, import processing, semantic
@@ -538,6 +548,7 @@ class BuildManager(ProgressMeter):
       version_id:      The current mypy version (based on commit id when possible)
       plugin:          Active mypy plugin(s)
       errors:          Used for reporting all errors
+      progress:        Optional progress meter
     """
 
     def __init__(self, data_dir: str,
@@ -548,10 +559,15 @@ class BuildManager(ProgressMeter):
                  options: Options,
                  version_id: str,
                  plugin: Plugin,
-                 errors: Errors) -> None:
+                 errors: Errors,
+                 progress: ProgressMeter = None,
+                 ) -> None:
         self.start_time = time.time()
         self.data_dir = data_dir
         self.errors = errors
+        self.progress_meter = progress
+        if self.progress_meter:
+            self.progress_meter.log_function = self.log
         self.errors.set_ignore_prefix(ignore_prefix)
         self.lib_path = tuple(lib_path)
         self.source_set = source_set
@@ -570,6 +586,9 @@ class BuildManager(ProgressMeter):
         self.stale_modules = set()  # type: Set[str]
         self.rechecked_modules = set()  # type: Set[str]
         self.plugin = plugin
+
+    def progress(self, *message: str) -> None:
+        self.progress_meter(*message)
 
     def maybe_swap_for_shadow_path(self, path: str) -> str:
         if (self.options.shadow_file and
@@ -687,11 +706,7 @@ class BuildManager(ProgressMeter):
 
     def log(self, *message: str) -> None:
         if self.options.verbosity >= 1:
-            msg = " ".join(map(str, message))
-            ll = self.line_length() - 7
-            if len(msg) > ll:
-                msg = msg[:ll-3] + '...'
-            print('LOG: ', msg, file=sys.stderr)
+            print('LOG: ', *message, file=sys.stderr)
             sys.stderr.flush()
 
     def trace(self, *message: str) -> None:

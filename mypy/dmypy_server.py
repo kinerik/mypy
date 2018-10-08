@@ -439,13 +439,50 @@ class Server:
         if not m:
             return {'error': "Cannot decypher function specification; must be [package]module:[class]function"}
         modname, classname, funcname = m.group(1, 2, 3)
-        suggestion = self.make_suggestion(modname, classname, funcname)
+        suggestion, error = self.make_suggestion(modname, classname, funcname)
+        if error:
+            assert not suggestion
+            return {'error': error}
+        assert suggestion
         if suggestion and not suggestion.endswith('\n'):
             suggestion += '\n'
         return {'out': suggestion, 'err': "", 'status': 0}
 
-    def make_suggestion(self, modname: str, classname: Optional[str], funcname: str) -> str:
-        return "module=%s, class=%s, function=%s" % (modname, classname, funcname)
+    def make_suggestion(self, modname: str, classname: Optional[str], funcname: str
+                        ) -> Tuple[Optional[str], Optional[str]]:
+        fgmanager = self.fine_grained_manager
+        if not fgmanager:
+            return None, "Command 'suggest' is only valid after a 'check' command"
+        graph = fgmanager.graph
+        if modname not in graph:
+            return None, "Unknown module %s" % (modname,)
+        state = graph[modname]  # type: mypy.build.State
+        tree = state.tree  # Optional[type: mypy.nodes.MypyFile]
+        assert tree is not None
+        moduledict = tree.names  # type: mypy.nodes.SymbolTable
+        if classname:
+            if classname not in moduledict:
+                return None, "Unknown class %s:%s" % (modname, classname)
+            node = moduledict[classname].node  # type: Optional[mypy.nodes.SymbolNode]
+            if not isinstance(node, mypy.nodes.TypeInfo):
+                return None, "Object %s:%s is not a class (%r)" % (modname, classname, node)
+            classdict = node.names  # type: mypy.nodes.SymbolTable
+            if funcname not in classdict:
+                return None, "Unknown method function %s:%s.%s" % (modname, classname, funcname)
+            node = classdict[funcname].node
+            if not isinstance(node, mypy.nodes.FuncDef):
+                return None, "Object %s:%s.%s is not a function (%r)" % (modname, classname, funcname, node)
+            # HIRO
+            return repr(node), None
+        else:
+            if funcname not in moduledict:
+                return None, "Unknown function %s:%s" % (modname, funcname)
+            node = moduledict[funcname].node
+            if not isinstance(node, mypy.nodes.FuncDef):
+                return None, "Object %s:%s is not a function (%r)" % (modname, funcname, node)
+            # HIRO
+            return repr(node), None
+        return "module=%s, class=%s, function=%s" % (modname, classname, funcname), None
 
     def cmd_hang(self) -> Dict[str, object]:
         """Hang for 100 seconds, as a debug hack."""

@@ -8,6 +8,7 @@ to enable fine-grained incremental reprocessing of changes.
 
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -431,6 +432,20 @@ class Server:
                 changed.append((s.module, s.path))
 
         return changed, removed
+
+    def cmd_suggest(self, function: str) -> Dict[str, object]:
+        """Suggest a signature for a function."""
+        m = re.match(r'\A(\w+(?:\.\w+)*):(?:(\w+)\.)?(\w+)\Z', function)
+        if not m:
+            return {'error': "Cannot decypher function specification; must be [package]module:[class]function"}
+        modname, classname, funcname = m.group(1, 2, 3)
+        suggestion = self.make_suggestion(modname, classname, funcname)
+        if suggestion and not suggestion.endswith('\n'):
+            suggestion += '\n'
+        return {'out': suggestion, 'err': "", 'status': 0}
+
+    def make_suggestion(self, modname: str, classname: Optional[str], funcname: str) -> str:
+        return "module=%s, class=%s, function=%s" % (modname, classname, funcname)
 
     def cmd_hang(self) -> Dict[str, object]:
         """Hang for 100 seconds, as a debug hack."""

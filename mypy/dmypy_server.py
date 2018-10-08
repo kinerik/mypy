@@ -472,16 +472,14 @@ class Server:
             node = classdict[funcname].node
             if not isinstance(node, mypy.nodes.FuncDef):
                 return None, "Object %s:%s.%s is not a function (%r)" % (modname, classname, funcname, node)
-            # HIRO
-            return repr(node), None
         else:
             if funcname not in moduledict:
                 return None, "Unknown function %s:%s" % (modname, funcname)
             node = moduledict[funcname].node
             if not isinstance(node, mypy.nodes.FuncDef):
                 return None, "Object %s:%s is not a function (%r)" % (modname, funcname, node)
-            # HIRO
-            return repr(node), None
+        # HIRO
+        return json.dumps(node.serialize(), indent=2), None
         return "module=%s, class=%s, function=%s" % (modname, classname, funcname), None
 
     def cmd_hang(self) -> Dict[str, object]:

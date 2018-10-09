@@ -120,6 +120,10 @@ ModulePathPairs = List[ModulePathPair]
 ChangesAndRemovals = Tuple[ModulePathPairs, ModulePathPairs]
 
 
+class SomethingError(Exception):
+    pass
+
+
 class Server:
 
     # NOTE: the instance is constructed in the parent process but
@@ -439,48 +443,105 @@ class Server:
         if not m:
             return {'error': "Cannot decypher function specification; must be [package]module:[class]function"}
         modname, classname, funcname = m.group(1, 2, 3)
-        suggestion, error = self.make_suggestion(modname, classname, funcname)
-        if error:
-            assert not suggestion
-            return {'error': error}
-        assert suggestion
-        if suggestion and not suggestion.endswith('\n'):
+        try:
+            suggestion = self.make_suggestion(modname, classname, funcname)
+        except SomethingError as err:
+            return {'error': str(err)}
+        if not suggestion.endswith('\n'):
             suggestion += '\n'
         return {'out': suggestion, 'err': "", 'status': 0}
 
-    def make_suggestion(self, modname: str, classname: Optional[str], funcname: str
-                        ) -> Tuple[Optional[str], Optional[str]]:
+    def make_suggestion(self, modname: str, classname: Optional[str], funcname: str) -> str:
         fgmanager = self.fine_grained_manager
         if not fgmanager:
-            return None, "Command 'suggest' is only valid after a 'check' command"
+            raise SomethingError("Command 'suggest' is only valid after a 'check' command")
+        manager = fgmanager.manager
         graph = fgmanager.graph
         if modname not in graph:
-            return None, "Unknown module %s" % (modname,)
+            raise SomethingError("Unknown module %s" % (modname,))
         state = graph[modname]  # type: mypy.build.State
-        tree = state.tree  # Optional[type: mypy.nodes.MypyFile]
+
+        if classname:
+            depkey = '%s.%s.%s' % (modname, classname, funcname)
+            node = self.find_method_node(state, classname, funcname)
+        else:
+            depkey = '%s.%s' % (modname, funcname)
+            node = self.find_function_node(state, funcname)
+
+        assert isinstance(node, mypy.nodes.FuncDef), repr(node)
+
+        depskey = '<%s>' % depkey
+
+        for modid, modstate in graph.items():
+            deps = modstate.fine_grained_deps
+            if depskey in deps:
+                callers = deps[depskey]
+                print("XXX in %s, found these callers: %s" % (modid, callers))
+                try:
+                    modstate.tree.mystery_target = depkey
+                    self.analyze_stuff(modstate, callers)
+                finally:
+                    modstate.tree.mystery_target = None
+
+        return "OK"
+
+    def analyze_stuff(self, state: mypy.build.State, callers: Set[str]) -> None:
+        # TODO: Put the class in context_type_name
+        nodeset = {mypy.checker.FineGrainedDeferredNode(self.find_node(caller), None, None)
+                   for caller in callers}
+        for thing in nodeset:
+            print("------", thing.node.fullname(), "------")
+            state.type_checker().check_second_pass({thing})
+
+    def find_node(self, key: str) -> Optional[mypy.nodes.SymbolNode]:
+        fgmanager = self.fine_grained_manager
+        graph = fgmanager.graph
+        parts = key.split('.')
+        tail = []
+        while True:
+            modname = '.'.join(parts)
+            if modname in graph:
+                if len(tail) == 2:
+                    classname, funcname = tail
+                    return self.find_method_node(graph[modname], classname, funcname)
+                elif len(tail) == 1:
+                    funcname = tail[0]
+                    return self.find_function_node(graph[modname], funcname)
+                else:
+                    raise SomethingError("Not a good node (%s, %s)" % (parts, tail))
+                    return None
+            tail.insert(0, parts.pop())
+
+    def find_method_node(self, state: mypy.build.State,
+                         classname: str, funcname: str) -> mypy.nodes.SymbolNode:
+        modname = state.id
+        tree = state.tree  # type: Optional[mypy.nodes.MypyFile]
         assert tree is not None
         moduledict = tree.names  # type: mypy.nodes.SymbolTable
-        if classname:
-            if classname not in moduledict:
-                return None, "Unknown class %s:%s" % (modname, classname)
-            node = moduledict[classname].node  # type: Optional[mypy.nodes.SymbolNode]
-            if not isinstance(node, mypy.nodes.TypeInfo):
-                return None, "Object %s:%s is not a class (%r)" % (modname, classname, node)
-            classdict = node.names  # type: mypy.nodes.SymbolTable
-            if funcname not in classdict:
-                return None, "Unknown method function %s:%s.%s" % (modname, classname, funcname)
-            node = classdict[funcname].node
-            if not isinstance(node, mypy.nodes.FuncDef):
-                return None, "Object %s:%s.%s is not a function (%r)" % (modname, classname, funcname, node)
-        else:
-            if funcname not in moduledict:
-                return None, "Unknown function %s:%s" % (modname, funcname)
-            node = moduledict[funcname].node
-            if not isinstance(node, mypy.nodes.FuncDef):
-                return None, "Object %s:%s is not a function (%r)" % (modname, funcname, node)
-        # HIRO
-        return json.dumps(node.serialize(), indent=2), None
-        return "module=%s, class=%s, function=%s" % (modname, classname, funcname), None
+        if classname not in moduledict:
+            raise SomethingError("Unknown class %s:%s" % (modname, classname))
+        node = moduledict[classname].node  # type: Optional[mypy.nodes.SymbolNode]
+        if not isinstance(node, mypy.nodes.TypeInfo):
+            raise SomethingError("Object %s:%s is not a class (%r)" % (modname, classname, node))
+        classdict = node.names  # type: mypy.nodes.SymbolTable
+        if funcname not in classdict:
+            raise SomethingError("Unknown method function %s:%s.%s" % (modname, classname, funcname))
+        node = classdict[funcname].node
+        if not isinstance(node, mypy.nodes.FuncDef):
+            raise SomethingError("Object %s:%s.%s is not a function (%r)" % (modname, classname, funcname, node))
+        return node
+
+    def find_function_node(self, state: mypy.build.State, funcname: str) -> mypy.nodes.SymbolNode:
+        modname = state.id
+        tree = state.tree  # type: Optional[mypy.nodes.MypyFile]
+        assert tree is not None
+        moduledict = tree.names  # type: mypy.nodes.SymbolTable
+        if funcname not in moduledict:
+            raise SomethingError("Unknown function %s:%s" % (modname, funcname))
+        node = moduledict[funcname].node
+        if not isinstance(node, mypy.nodes.FuncDef):
+            raise SomethingError("Object %s:%s is not a function (%r)" % (modname, funcname, node))
+        return node
 
     def cmd_hang(self) -> Dict[str, object]:
         """Hang for 100 seconds, as a debug hack."""

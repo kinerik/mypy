@@ -659,6 +659,8 @@ class ExpressionChecker(ExpressionVisitor[Type]):
             object_type: If callable_name refers to a method, the type of the object
                 on which the method is being called
         """
+        if callable_name and callable_name == self.chk.tree.mystery_target:
+            print("XXX Found a hit for", callable_name)
         arg_messages = arg_messages or self.msg
 
         if isinstance(callee, CallableType):

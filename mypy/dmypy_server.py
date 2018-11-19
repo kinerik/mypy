@@ -477,6 +477,7 @@ class Server:
             if depskey in deps:
                 callers = deps[depskey]
                 print("XXX in %s, found these callers: %s" % (modid, callers))
+                assert modstate.tree is not None
                 try:
                     modstate.tree.mystery_target = depkey
                     self.analyze_stuff(modstate, callers)
@@ -487,17 +488,21 @@ class Server:
 
     def analyze_stuff(self, state: mypy.build.State, callers: Set[str]) -> None:
         # TODO: Put the class in context_type_name
-        nodeset = {mypy.checker.FineGrainedDeferredNode(self.find_node(caller), None, None)
-                   for caller in callers}
+        nodeset = set()
+        for caller in callers:
+            node = self.find_node(caller)
+            if isinstance(node, mypy.nodes.FuncDef):
+                nodeset.add(mypy.checker.FineGrainedDeferredNode(node, None, None))
         for thing in nodeset:
             print("------", thing.node.fullname(), "------")
-            state.type_checker().check_second_pass({thing})
+            state.type_checker().check_second_pass([thing])
 
     def find_node(self, key: str) -> Optional[mypy.nodes.SymbolNode]:
         fgmanager = self.fine_grained_manager
+        assert fgmanager is not None
         graph = fgmanager.graph
         parts = key.split('.')
-        tail = []
+        tail = []  # type: List[str]
         while True:
             modname = '.'.join(parts)
             if modname in graph:

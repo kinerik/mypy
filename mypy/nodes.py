@@ -231,7 +231,7 @@ class MypyFile(SymbolNode):
     plugin_deps = None  # type: Dict[str, Set[str]]
 
     # Full name of dmypy suggest target (pkg.mod.cls.func)
-    mystery_target = None  # type: str
+    mystery_target = None  # type: Optional[str]
 
     def __init__(self,
                  defs: List[Statement],
